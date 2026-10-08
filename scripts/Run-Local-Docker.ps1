@@ -38,9 +38,10 @@ try {
     $healthy = $false
     while ((Get-Date) -lt $deadline) {
         try {
-            $live = Invoke-RestMethod "$BaseUrl/health/live" -TimeoutSec 5
-            if ($live.status -eq 'Healthy') { $healthy = $true; break }
-        } catch { Start-Sleep -Seconds 3 }
+            $live = Invoke-WebRequest "$BaseUrl/health/live" -TimeoutSec 5 -SkipHttpErrorCheck
+            if ($live.StatusCode -eq 200) { $healthy = $true; break }
+        } catch { }
+        Start-Sleep -Seconds 3
     }
     if (-not $healthy) { throw "API did not report Healthy within $ReadyWaitSeconds seconds." }
 
