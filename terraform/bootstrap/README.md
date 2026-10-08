@@ -4,7 +4,7 @@ Run-once root that creates the Azure Storage the FinSure platform uses for
 remote Terraform state. Backend here is **local** (default `terraform.tfstate`,
 git-ignored): this root must exist before anything else has remote state to store.
 
-Creates (KISS — one LRS account, isolation by container):
+Creates (KISS: one LRS account, isolation by container):
 
 - Resource group `rg-ck-labs-tfstate`
 - Storage account `cklabstfstate<storage_suffix>` (TLS 1.2, no public blobs)
@@ -50,8 +50,8 @@ backend "azurerm" {
 
 ## Never destroy
 
-Do not `terraform destroy` this root while any environment stores state here —
-that orphans dev/prod state. Tear down environments first, then bootstrap last.
+Do not `terraform destroy` this root while any environment stores state here.
+That orphans dev/prod state. Tear down environments first, then bootstrap last.
 Both the resource group and the storage account carry
 `lifecycle { prevent_destroy = true }`, so a destroy (or an apply that would
 replace them) fails until that guard is deliberately removed.
@@ -59,4 +59,4 @@ replace them) fails until that guard is deliberately removed.
 Known gaps (documented, not mitigated): the storage account carries no `tags`
 and `public_network_access_enabled` is left at the provider default (no network
 lockdown). State protection comes from private containers, no public blobs,
-and TLS 1.2 — wire tags + network rules before handling real PII.
+and TLS 1.2. Wire tags + network rules before handling real PII.

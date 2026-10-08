@@ -1,10 +1,10 @@
 # FinSure Vendor Payment Risk Scoring — Azure Integration Platform
 
-Pollinate standalone assessment. Secure, production-ready
-integration between FinSure Capital (SME lending) and the RiskShield vendor API,
+Pollinate standalone assessment.
+Integration between FinSure Capital (SME lending) and the RiskShield vendor API,
 on Microsoft Azure with Terraform and Azure DevOps.
 
-Status: **Phases 0–8 complete** — .NET 10 API green, Dockerfile, bootstrap
+Status: **Phases 0–8 complete**: .NET 10 API green, Dockerfile, bootstrap
 state storage, four Terraform child modules, root module with dev/prod
 environments, seven-stage Azure DevOps pipeline (Build, InfraDev, InfraProd,
 DeployDev, DeployProd, SmokeDev, SmokeProd), this doc set, and local E2E
@@ -79,15 +79,15 @@ reference (resolved inside Azure, never in Terraform or pipeline logs) →
 HTTPS call to RiskShield with `X-Correlation-ID` → scored response or a
 mapped 502/504. Health: `/health/live` (self) and `/health/ready` (vendor key
 resolved). Resilience is `AddStandardResilienceHandler` (timeout + retry +
-circuit breaker); retries cover 5xx/408/429 only — vendor 4xx is never retried.
+circuit breaker); retries cover 5xx/408/429 only. Vendor 4xx is never retried.
 Per-attempt timeout 5s, up to 3 retries, total budget 25s
 (`5s × (3+2)`), inside the Container Apps ingress ~30s front-end default
 (azurerm 4.81 has no ingress timeout knob, so the app budget must stay under
-it — otherwise the platform 504s before the app maps its own 504).
+it; otherwise the platform 504s before the app maps its own 504).
 
 Observability: console logs only, forwarded to Log Analytics by the Container
-Apps environment — provisioned console-shipped by design within the current scope.
-Application Insights is provisioned but unwired — no
+Apps environment. Console shipping covers the current scope by design.
+Application Insights is provisioned but unwired: no
 connection string is passed (`env_vars` carries no telemetry setting, the root
 module exposes no Insights output), the API has no exporter, and the
 `FinSure.RiskScoring` meter is in-process only. Trade-off: console logs keep the path simple with no SDK; Insights adds distributed tracing at the cost of SDK wiring and secret handling. One-var wiring path when needed: store the Insights connection string as a vault secret, map it via `secret_env` (APPLICATIONINSIGHTS_CONNECTION_STRING), add the SDK/exporter, no other infra reshaping.
@@ -108,11 +108,11 @@ AAD role-assignment propagation.
   with `[A-Za-z0-9-]` allowlist (overlong truncates, invalid mints), echoed on the
   response, forwarded to RiskShield.
 - Resilience: `AddStandardResilienceHandler` (timeout + retry + circuit breaker);
-  retries 5xx/408/429 only — vendor 4xx is never retried.
+  retries 5xx/408/429 only. Vendor 4xx is never retried.
 - PII: `idNumber` is never logged. Logs carry score metadata and id length only.
   Covered by an explicit test (`IdNumber_NeverReachesLogs`).
 - One built-in meter: `FinSure.RiskScoring` / `riskscoring.validations{outcome}`
-  (in-process only — no exporter, console logs are the shipped telemetry).
+  (in-process only, no exporter; console logs are the shipped telemetry).
 
 ## Run locally
 
@@ -193,7 +193,7 @@ terraform output storage_account_name    # -> tfStateStorageAccount
 ### 2. Bootstrap output → variable group wiring
 
 Create `vg-ck-labs-dev` / `vg-ck-labs-prod` (Key Vault–linked for secrets).
-Secret *values* never live here — only names and non-secret coordinates.
+Secret *values* never live here: only names and non-secret coordinates.
 
 | Source (terraform output) | Variable group variable | Used by |
 |---|---|---|
@@ -219,7 +219,7 @@ First deploy (RiskShield key wiring): without this, the app crash-loops on
    (mapped from `$(riskShieldApiKey)` via the step `env:` block, so the
    value never appears in YAML or tfvars and stays `sensitive` in state).
 3. `environments/{dev,prod}.tfvars` carry only the name mapping
-   `secret_env = { "RiskShield__ApiKey" = "riskshield-api-key" }` — the root
+   `secret_env = { "RiskShield__ApiKey" = "riskshield-api-key" }`. The root
    module forwards `module.vault.secret_ids` into `container_app`
    `key_vault_secrets`, which renders the `secret` block and the
    `RiskShield__ApiKey` env ref. Never put the key value in tfvars
@@ -236,7 +236,7 @@ Also required outside this file: service connections `sc-ck-labs-dev` /
 verifies the running image host is `$(acrName).azurecr.io` with tag
 `$(imageTag)` and fails otherwise.
 To redeploy or roll back without a new commit, queue the pipeline with
-`imageTag` overridden to an existing ACR tag — Infra applies that tag and
+`imageTag` overridden to an existing ACR tag. Infra applies that tag and
 Deploy verifies it. Never `az containerapp update` the image outside
 Terraform: it mutates TF-owned fields (cpu/memory/scale/secrets) and causes
 drift on the next plan.
@@ -253,7 +253,7 @@ exact published plan artifact and `terraform apply` it. Dev has no gate
 ### 5. Smoke-failure triage
 
 Smoke contract: `/health/*` must be 2xx; `/validate` passes on **200 or 502**
-(502 = vendor unreachable, wiring correct — the expected state without a real
+(502 = vendor unreachable, wiring correct: the expected state without a real
 vendor key). Anything else fails the stage.
 
 | Symptom | Likely cause | Check |
@@ -273,25 +273,25 @@ IDs, emails, or vendor keys in smoke tests.
 
 - `lock_type = ""` in dev (no lock, fast iteration); `"CanNotDelete"` in prod
   on `rg-ck-labs-prod`. The lock also blocks `terraform destroy` of the RG
-  contents — prod teardown is a deliberate two-step (remove lock, then destroy).
+  contents. Prod teardown is a deliberate two-step (remove lock, then destroy).
 - No IP allow-list knob exists (no child module takes one, nothing in
   tfvars). Future wiring (e.g. vault network ACLs) only needs a module
-  input — no root reshaping.
+  input. No root reshaping.
 
 ## Threat model (STRIDE-lite)
 
 | # | Threat | Mitigation in this repo |
 |---|---|---|
-| T0 | Anonymous `/validate`, no auth / rate limit (**highest severity**) | **No mitigation in this repo.** Ingress is internet-external and `POST /validate` takes no caller credential (no API key/JWT) and has no throttling — anyone can burn RiskShield quota or enumerate PII. Do not expose beyond test traffic without an APIM/WAF/rate-limit front door |
-| T1 | PII (`idNumber`) leaks into logs/traces; PII egressed to RiskShield | Local logs: never logged — only score metadata + id length (`ValidateEndpoint.cs:60-63`); explicit regression test `IdNumber_NeverReachesLogs`; synthetic payloads only in smoke. Egress: full `firstName/lastName/idNumber` is POSTed to RiskShield `v1/score` by design — no DPA / retention / residency basis is documented here (compliance out of scope, not just availability) |
+| T0 | Anonymous `/validate`, no auth / rate limit (**highest severity**) | **No mitigation in this repo.** Ingress is internet-external and `POST /validate` takes no caller credential (no API key/JWT) and has no throttling. Anyone can burn RiskShield quota or enumerate PII. Do not expose beyond test traffic without an APIM/WAF/rate-limit front door |
+| T1 | PII (`idNumber`) leaks into logs/traces; PII egressed to RiskShield | Local logs: never logged; only score metadata + id length (`ValidateEndpoint.cs:60-63`); explicit regression test `IdNumber_NeverReachesLogs`; synthetic payloads only in smoke. Egress: full `firstName/lastName/idNumber` is POSTed to RiskShield `v1/score` by design. No DPA / retention / residency basis is documented here (compliance review is out of scope) |
 | T2 | RiskShield key stolen from code/state/CI | Key lives in Key Vault; app resolves it via secret reference inside Azure; Terraform passes only secret *ids* (`sensitive = true`, never values); pipeline passes the value once via `-var="secrets={...}"` from the `$(riskShieldApiKey)` secret (Key Vault–linked group); tfvars carry only the `secret_env` name mapping; never committed (covered by the repo secret-scan gate) |
 | T3 | Image tampering / public pull | Private ACR; **MI-only** pull (`AcrPull` on the app's user-assigned identity, admin account off); image pinned by `imageTag` and checked at Deploy |
 | T4 | Privilege use before RBAC propagates | 60s `time_sleep.rbac_propagation` guard inside the Container App module; Deploy verify fails loudly on mismatch instead of silently drifting |
-| T5 | Plaintext / downgraded traffic | Ingress HTTPS is the Container Apps **provider default** (`external_enabled = true`), not an explicit TLS/min-version setting; container transport is plain HTTP on 8080 inside the managed environment only. Vendor TLS is **enforced at startup**: `RiskShieldOptions.BaseUrl` requires absolute `https://` scheme (`RiskShieldOptions` validation + `ValidateOnStart` fails start on `http://`) — default stays `https://api.riskshield.com`; regression test covers `http://` rejection |
-| T6 | Spoofed requests / untraceable calls | `X-Correlation-ID` accepted-or-minted, echoed and forwarded to RiskShield; health split (`live` vs `ready`) so infra vs vendor-config failures are distinguishable. Echo is capped — see T10 |
+| T5 | Plaintext / downgraded traffic | Ingress HTTPS is the Container Apps **provider default** (`external_enabled = true`), not an explicit TLS/min-version setting; container transport is plain HTTP on 8080 inside the managed environment only. Vendor TLS is **enforced at startup**: `RiskShieldOptions.BaseUrl` requires absolute `https://` scheme (`RiskShieldOptions` validation + `ValidateOnStart` fails start on `http://`), default stays `https://api.riskshield.com`; regression test covers `http://` rejection |
+| T6 | Spoofed requests / untraceable calls | `X-Correlation-ID` accepted-or-minted, echoed and forwarded to RiskShield; health split (`live` vs `ready`) so infra vs vendor-config failures are distinguishable. Echo is capped (see T10) |
 | T7 | Prod mutated without review | `env-ck-labs-prod` manual approval on the exact published `tfplan-prod` artifact; `CanNotDelete` lock on the prod RG |
 | T8 | State-file tampering / cross-env bleed | Per-env state (`tfstate-dev` / `tfstate-prod` containers + keys) in a TLS 1.2, no-public-blob storage account; bootstrap root is local-state and never destroyed while envs exist |
-| T9 | Public network defaults, no allow-list knob | ACR `public_network_access_enabled` defaults `true`, vault `public_network_access_enabled` defaults `true`, state storage has no network lockdown and no tags (see `terraform/bootstrap/README.md`); no child module takes an allow-list input. No mitigation yet — add module inputs for vault/registry network ACLs + private endpoints before handling real PII |
+| T9 | Public network defaults, no allow-list knob | ACR `public_network_access_enabled` defaults `true`, vault `public_network_access_enabled` defaults `true`, state storage has no network lockdown and no tags (see `terraform/bootstrap/README.md`); no child module takes an allow-list input. No mitigation yet. Add module inputs for vault/registry network ACLs + private endpoints before handling real PII |
 | T10 | Log injection / header bloat via correlation ID | `CorrelationIdMiddleware` caps inbound `X-Correlation-ID` at 128 chars with `[A-Za-z0-9-]` allowlist into the response header, the log scope, and the vendor header. Overlong valid values truncate to 128; values with invalid chars mint a new id. Bounds header/log size and blocks log injection and cache-key poisoning. Covered by overlong/invalid tests |
 
 Out of scope / residual risk: T0 open to the internet (needs auth + rate limiting);
@@ -310,9 +310,9 @@ is manual via Key Vault.
 | A4 | Terraform `>= 1.3.6`; CI pins `1.9.8` (`tfVersion` in the pipeline); azurerm `=4.81.0` (avoids 5.x breaking changes). Full pin matrix lives in `terraform/README.md`. |
 | A5 | Environments exactly `dev` and `prod`. |
 | A6 | No real RiskShield key: happy path proven via stubbed client; live returns clean 502. |
-| A7 | xUnit **v2.9.3** (template default), not v3 — KISS; v3 runner migration buys nothing here. |
+| A7 | xUnit **v2.9.3** (template default), not v3. KISS: v3 runner migration buys nothing here. |
 | A8 | `.slnx` solution format (dotnet 10 SDK default). |
-| A9 | No blueprints, no generator, no `run.ps1`, no submodules — hand-written IaC only. |
+| A9 | No blueprints, no generator, no `run.ps1`, no submodules: hand-written IaC only. |
 | A10 | `app/Dockerfile` build context is `app/`; runtime `aspnet:10.0-alpine` (lean + busybox `wget` HEALTHCHECK), non-root `app` user, `EXPOSE 8080`. |
 | A11 | Bootstrap uses one LRS storage account + per-env containers (dev/prod isolated by container + backend key); `southafricanorth` default region; storage suffix via `storage_suffix` var. |
 | A12 | Smoke `/validate` passes on 200 (vendor live) or 502 (vendor unreachable, wiring correct); synthetic payloads only. |

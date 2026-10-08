@@ -49,7 +49,7 @@ terraform init -reconfigure `
 ## Bootstrap output → variable group wiring
 
 Copy each bootstrap/root output into the matching variable-group variable.
-Secret *values* never go here — only names and non-secret coordinates.
+Secret *values* never go here: only names and non-secret coordinates.
 
 | Source (terraform output) | Variable group variable | Used by |
 |---|---|---|
@@ -108,7 +108,7 @@ Without this the API crash-loops (`RiskShield__ApiKey` is `Required` +
   stays lock-free for fast iteration.
 - No IP allow-list knob exists: no child module takes one, so there is
   nothing to set in tfvars. Adding network hardening later means adding a
-  module input (e.g. vault network ACLs) — no root reshaping required.
+  module input (e.g. vault network ACLs). No root reshaping required.
 - Never put secret values in tfvars. Pass `secrets` via pipeline-managed
   `-var` / `TF_VAR_` values instead. `terraform plan` renders secret values
   as `(sensitive value)`; if a value ever leaks into a tfvars or state diff,
@@ -117,5 +117,5 @@ Without this the API crash-loops (`RiskShield__ApiKey` is `Required` +
   `terraform/.terraform-version` pins the local dev CLI (`1.3.6`) while
   `pipelines/azure-pipelines.yml` (`tfVersion: 1.9.8`) pins CI. Both satisfy
   the constraint, so the `.terraform-version` file is intentionally left at
-  `1.3.6` — do not bump it to match CI without re-running `fmt` + `validate`
+  `1.3.6`. Do not bump it to match CI without re-running `fmt` + `validate`
   on both roots first.

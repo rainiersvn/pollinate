@@ -22,7 +22,7 @@ AAD role assignments propagate asynchronously; a first-deploy image pull or
 secret resolve can fail before they land. `time_sleep.rbac_propagation`
 (default `60s`) sits between the assignments and the app via `depends_on`.
 Create-only: only `create_duration` is set (no `update_duration`), so the
-60s wait runs once at creation — image-only/tag changes do not retrigger it.
+60s wait runs once at creation. Image-only/tag changes do not retrigger it.
 
 ## Usage
 
