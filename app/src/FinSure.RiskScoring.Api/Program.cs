@@ -7,10 +7,15 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 var builder = WebApplication.CreateBuilder(args);
 
 // Fail fast on missing vendor configuration instead of failing requests at runtime.
+// BaseUrl https is enforced here as well: http downgrades fail startup.
 builder.Services
   .AddOptions<RiskShieldOptions>()
   .BindConfiguration(RiskShieldOptions.SectionName)
   .ValidateDataAnnotations()
+  .Validate(
+    o => Uri.TryCreate(o.BaseUrl, UriKind.Absolute, out var uri) &&
+         string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase),
+    "RiskShield:BaseUrl must be an absolute https:// URL.")
   .ValidateOnStart();
 
 var resilience = builder.Configuration.GetSection(RiskShieldOptions.SectionName).Get<RiskShieldOptions>()

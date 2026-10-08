@@ -14,7 +14,7 @@ this batch is working tree only (see G9).
 | G2 | terraform fmt (bootstrap) | `terraform fmt -check` in `terraform/bootstrap/` | exit 0 PASS |
 | G3 | terraform validate (root) | `terraform init -backend=false` + `terraform validate` | `Success! The configuration is valid.` PASS |
 | G4 | terraform validate (bootstrap) | `terraform init -backend=false` + `terraform validate` | `Success! The configuration is valid.` PASS |
-| G5 | dotnet test (full, Release, coverage gate) | `dotnet test FinSure.RiskScoring.slnx --configuration Release --collect:'XPlat Code Coverage'` in `app/` + line-rate >= 80% from `coverage.cobertura.xml` | `Failed: 0, Passed: 16, Skipped: 0, Total: 16`; line-rate 93.4% >= 80% PASS |
+| G5 | dotnet test (full, Release, coverage gate) | `dotnet test FinSure.RiskScoring.slnx --configuration Release --collect:'XPlat Code Coverage'` in `app/` + line-rate >= 80% from `coverage.cobertura.xml` | `Failed: 0, Passed: 23, Skipped: 0, Total: 23`; line-rate 94.1% >= 80% PASS |
 | G6 | YAML re-parse | `python -c "import yaml; yaml.safe_load(...azure-pipelines.yml)"` | OK, stages: Build, InfraDev, InfraProd, DeployDev, DeployProd, SmokeDev, SmokeProd PASS |
 | G7 | Secret scan (repo-wide) | grep for `api-key/password/secret = "..."`, `BEGIN PRIVATE KEY`, storage `AccountKey` | Only `local-dummy-key` (README example) and `"secret-key"` (xUnit stub) — no real keys, no PII values in tfvars/pipeline PASS |
 | G8 | docker build | `docker build -f Dockerfile -t finsure-risk-scoring:e2e .` (context `app/`) | export + `naming to finsure-risk-scoring:e2e done` PASS |
@@ -43,6 +43,10 @@ POST /validate {"firstName":"Jane","lastName":"Doe","idNumber":"9001011234088"}
 | `GET /health/ready` | 200 Healthy (dummy key resolves) | 200 Healthy | PASS — vendor-key wiring healthy |
 | `POST /validate` (synthetic PII) | 502 (api.riskshield.com unreachable; wiring correct) | 502 BadGateway | PASS — expected vendor-unreachable mapping, not a wiring fault |
 | PII in container logs | `idNumber` value never logged | `docker logs \| grep 9001011234088` → 0 matches | PASS — log redaction holds on the 502 path too |
+
+Observability decision: console logs only, forwarded to Log Analytics — provisioned console-shipped by design within the current scope, no code change. Application Insights is provisioned but unwired; one-var wiring path is documented in the root README and the observability module README (vault secret + secret_env mapping for the connection string + SDK/exporter).
+
+Vendor TLS (T5) is enforced at startup (https scheme validation, http fails start) and correlation IDs (T10) are capped at 128 chars with allowlist truncate-or-mint; both covered by unit tests included in the G5 count.
 
 Container removed after evidence (`docker rm -f finsure-e2e`). Image tag
 `finsure-risk-scoring:e2e` is local-only evidence, not pushed.

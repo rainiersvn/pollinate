@@ -86,10 +86,11 @@ Per-attempt timeout 5s, up to 3 retries, total budget 25s
 it — otherwise the platform 504s before the app maps its own 504).
 
 Observability: console logs only, forwarded to Log Analytics by the Container
-Apps environment. Application Insights is provisioned but unwired — no
+Apps environment — provisioned console-shipped by design within the current scope.
+Application Insights is provisioned but unwired — no
 connection string is passed (`env_vars` carries no telemetry setting, the root
 module exposes no Insights output), the API has no exporter, and the
-`FinSure.RiskScoring` meter is in-process only.
+`FinSure.RiskScoring` meter is in-process only. Trade-off: console logs keep the path simple with no SDK; Insights adds distributed tracing at the cost of SDK wiring and secret handling. One-var wiring path when needed: store the Insights connection string as a vault secret, map it via `secret_env` (APPLICATIONINSIGHTS_CONNECTION_STRING), add the SDK/exporter, no other infra reshaping.
 
 Terraform shape: one resource group per environment plus four child modules
 (depth ≤ 2, no child-to-child references). `observability` first, then
@@ -103,7 +104,8 @@ AAD role-assignment propagation.
 - `POST /validate` `{firstName, lastName, idNumber}` → `{riskScore, riskLevel}`
   - 400 malformed input, 502 vendor 5xx/4xx/transport, 504 vendor timeout.
 - `GET /health/live` (self) and `GET /health/ready` (vendor key resolved).
-- Correlation: inbound `X-Correlation-ID` accepted or minted, echoed on the
+- Correlation: inbound `X-Correlation-ID` accepted or minted, capped at 128 chars
+  with `[A-Za-z0-9-]` allowlist (overlong truncates, invalid mints), echoed on the
   response, forwarded to RiskShield.
 - Resilience: `AddStandardResilienceHandler` (timeout + retry + circuit breaker);
   retries 5xx/408/429 only — vendor 4xx is never retried.
@@ -161,7 +163,7 @@ docker rm -f <cid>
 
 ```powershell
 cd Pollinate/app
-dotnet test FinSure.RiskScoring.slnx --configuration Release            # 16/16 passed
+dotnet test FinSure.RiskScoring.slnx --configuration Release            # 23/23 passed
 dotnet test FinSure.RiskScoring.slnx --configuration Release --collect:'XPlat Code Coverage'  # >=80% line gate (line-rate reported by coverage.cobertura.xml)
 dotnet list tests/.../FinSure.RiskScoring.Api.Tests.csproj package --vulnerable
 dotnet publish src/FinSure.RiskScoring.Api -c Release
@@ -285,17 +287,16 @@ IDs, emails, or vendor keys in smoke tests.
 | T2 | RiskShield key stolen from code/state/CI | Key lives in Key Vault; app resolves it via secret reference inside Azure; Terraform passes only secret *ids* (`sensitive = true`, never values); pipeline passes the value once via `-var="secrets={...}"` from the `$(riskShieldApiKey)` secret (Key Vault–linked group); tfvars carry only the `secret_env` name mapping; never committed (covered by the repo secret-scan gate) |
 | T3 | Image tampering / public pull | Private ACR; **MI-only** pull (`AcrPull` on the app's user-assigned identity, admin account off); image pinned by `imageTag` and checked at Deploy |
 | T4 | Privilege use before RBAC propagates | 60s `time_sleep.rbac_propagation` guard inside the Container App module; Deploy verify fails loudly on mismatch instead of silently drifting |
-| T5 | Plaintext / downgraded traffic | Ingress HTTPS is the Container Apps **provider default** (`external_enabled = true`), not an explicit TLS/min-version setting; container transport is plain HTTP on 8080 inside the managed environment only. Vendor TLS is **config-controlled, not enforced**: `RiskShieldOptions.BaseUrl` carries `[Url]` only, so an `http://` BaseUrl would silently downgrade vendor traffic — keep the default `https://api.riskshield.com`; add a startup https check before prod use |
-| T6 | Spoofed requests / untraceable calls | `X-Correlation-ID` accepted-or-minted, echoed and forwarded to RiskShield; health split (`live` vs `ready`) so infra vs vendor-config failures are distinguishable. Echo is unbounded — see T10 |
+| T5 | Plaintext / downgraded traffic | Ingress HTTPS is the Container Apps **provider default** (`external_enabled = true`), not an explicit TLS/min-version setting; container transport is plain HTTP on 8080 inside the managed environment only. Vendor TLS is **enforced at startup**: `RiskShieldOptions.BaseUrl` requires absolute `https://` scheme (`RiskShieldOptions` validation + `ValidateOnStart` fails start on `http://`) — default stays `https://api.riskshield.com`; regression test covers `http://` rejection |
+| T6 | Spoofed requests / untraceable calls | `X-Correlation-ID` accepted-or-minted, echoed and forwarded to RiskShield; health split (`live` vs `ready`) so infra vs vendor-config failures are distinguishable. Echo is capped — see T10 |
 | T7 | Prod mutated without review | `env-ck-labs-prod` manual approval on the exact published `tfplan-prod` artifact; `CanNotDelete` lock on the prod RG |
 | T8 | State-file tampering / cross-env bleed | Per-env state (`tfstate-dev` / `tfstate-prod` containers + keys) in a TLS 1.2, no-public-blob storage account; bootstrap root is local-state and never destroyed while envs exist |
 | T9 | Public network defaults, no allow-list knob | ACR `public_network_access_enabled` defaults `true`, vault `public_network_access_enabled` defaults `true`, state storage has no network lockdown and no tags (see `terraform/bootstrap/README.md`); no child module takes an allow-list input. No mitigation yet — add module inputs for vault/registry network ACLs + private endpoints before handling real PII |
-| T10 | Log injection / header bloat via correlation ID | `CorrelationIdMiddleware` echoes inbound `X-Correlation-ID` **unbounded** (no length cap, no charset allowlist) into the response header, the log scope, and the vendor header. Oversized/malicious values enable log injection, header bloat, downstream cache-key poisoning. No mitigation yet — cap length, allowlist charset, truncate/drop invalid |
+| T10 | Log injection / header bloat via correlation ID | `CorrelationIdMiddleware` caps inbound `X-Correlation-ID` at 128 chars with `[A-Za-z0-9-]` allowlist into the response header, the log scope, and the vendor header. Overlong valid values truncate to 128; values with invalid chars mint a new id. Bounds header/log size and blocks log injection and cache-key poisoning. Covered by overlong/invalid tests |
 
 Out of scope / residual risk: T0 open to the internet (needs auth + rate limiting);
 no WAF or private-endpoint hardening yet; PII
-egress to RiskShield has no documented compliance basis (T1); vendor TLS relies
-on config, not code enforcement (T5); correlation IDs are unvalidated (T10);
+egress to RiskShield has no documented compliance basis (T1);
 vendor availability is external (502/504 mapped, not prevented); secret rotation
 is manual via Key Vault.
 
@@ -316,6 +317,7 @@ is manual via Key Vault.
 | A11 | Bootstrap uses one LRS storage account + per-env containers (dev/prod isolated by container + backend key); `southafricanorth` default region; storage suffix via `storage_suffix` var. |
 | A12 | Smoke `/validate` passes on 200 (vendor live) or 502 (vendor unreachable, wiring correct); synthetic payloads only. |
 | A13 | Pipeline SDK is .NET 10 (`10.0.x`) to match the `net10.0` target; deploy goes through Terraform (image-tag var), never `az containerapp update`. |
+| A14 | Vendor `BaseUrl` https enforcement is code (`RiskShieldOptions` validation + `ValidateOnStart`), not a config promise; correlation cap is code (128 + allowlist). App Insights stays unwired console-shipped by design with a documented one-var wiring path. |
 
 ## Roadmap
 
