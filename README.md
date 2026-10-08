@@ -1,6 +1,6 @@
 # FinSure Vendor Payment Risk Scoring — Azure Integration Platform
 
-DVT Pollinate Platform Engineering technical assessment. Secure, production-ready
+Pollinate standalone assessment. Secure, production-ready
 integration between FinSure Capital (SME lending) and the RiskShield vendor API,
 on Microsoft Azure with Terraform and Azure DevOps.
 
@@ -15,6 +15,9 @@ evidence (`docs/e2e-evidence.md`).
 ```text
 Pollinate/
 ├── README.md            # this file: architecture, run/deploy, threat model
+├── scripts/
+│   ├── Run-Local-Dotnet.ps1  # dotnet run + health/validate checks (param-driven)
+│   └── Run-Local-Docker.ps1  # build/run/whoami/health/validate/PII checks + cleanup
 ├── docs/
 │   └── e2e-evidence.md  # Phase 8 local E2E evidence (health 200, validate 502)
 ├── app/                # .NET 10 minimal API + xUnit tests
@@ -109,12 +112,20 @@ AAD role-assignment propagation.
 - One built-in meter: `FinSure.RiskScoring` / `riskscoring.validations{outcome}`
   (in-process only — no exporter, console logs are the shipped telemetry).
 
-## Run locally (verified 2026-10-06)
+## Run locally
 
 F5 / `dotnet run` needs `RiskShield__ApiKey` (`Required` + `ValidateOnStart`,
 otherwise `OptionsValidationException` on start). `Properties/launchSettings.json`
 ships a `local-dummy-key` placeholder for F5; the CLI equivalent is below
-(real key lives in Key Vault, never in code).
+(real key lives in Key Vault, never in code). Scripted form (each script
+prints every command before running it):
+
+```powershell
+pwsh ./scripts/Run-Local-Dotnet.ps1   # dotnet run on http://127.0.0.1:18080 + health/validate checks
+pwsh ./scripts/Run-Local-Docker.ps1   # build finsure-risk-scoring:local + run + whoami/health/validate/PII checks + cleanup
+```
+
+Manual equivalents (the same steps the scripts run):
 
 ```powershell
 cd Pollinate/app
@@ -138,6 +149,12 @@ cd Pollinate/app
 docker build -f Dockerfile -t finsure-risk-scoring:local .
 docker run --rm -p 18080:8080 -e RiskShield__ApiKey=local-dummy-key finsure-risk-scoring:local
 docker exec <cid> whoami   # app (non-root, UID 1654)
+Invoke-RestMethod http://127.0.0.1:18080/health/live    # 200
+Invoke-WebRequest http://127.0.0.1:18080/validate -Method Post `
+  -Body '{"firstName":"Jane","lastName":"Doe","idNumber":"9001011234088"}' `
+  -ContentType 'application/json' -SkipHttpErrorCheck   # 502 expected
+docker logs <cid> | Select-String '9001011234088'       # 0 matches: idNumber never logged
+docker rm -f <cid>
 ```
 
 ## Validate
@@ -145,7 +162,7 @@ docker exec <cid> whoami   # app (non-root, UID 1654)
 ```powershell
 cd Pollinate/app
 dotnet test FinSure.RiskScoring.slnx --configuration Release            # 16/16 passed
-dotnet test FinSure.RiskScoring.slnx --configuration Release --collect:'XPlat Code Coverage'  # >=80% line gate (93.4% measured 2026-10-06)
+dotnet test FinSure.RiskScoring.slnx --configuration Release --collect:'XPlat Code Coverage'  # >=80% line gate (line-rate reported by coverage.cobertura.xml)
 dotnet list tests/.../FinSure.RiskScoring.Api.Tests.csproj package --vulnerable
 dotnet publish src/FinSure.RiskScoring.Api -c Release
 ```
@@ -265,8 +282,8 @@ IDs, emails, or vendor keys in smoke tests.
 |---|---|---|
 | T0 | Anonymous `/validate`, no auth / rate limit (**highest severity**) | **No mitigation in this repo.** Ingress is internet-external and `POST /validate` takes no caller credential (no API key/JWT) and has no throttling — anyone can burn RiskShield quota or enumerate PII. Do not expose beyond test traffic without an APIM/WAF/rate-limit front door |
 | T1 | PII (`idNumber`) leaks into logs/traces; PII egressed to RiskShield | Local logs: never logged — only score metadata + id length (`ValidateEndpoint.cs:60-63`); explicit regression test `IdNumber_NeverReachesLogs`; synthetic payloads only in smoke. Egress: full `firstName/lastName/idNumber` is POSTed to RiskShield `v1/score` by design — no DPA / retention / residency basis is documented here (compliance out of scope, not just availability) |
-| T2 | RiskShield key stolen from code/state/CI | Key lives in Key Vault; app resolves it via secret reference inside Azure; Terraform passes only secret *ids* (`sensitive = true`, never values); pipeline passes the value once via `-var="secrets={...}"` from the `$(riskShieldApiKey)` secret (Key Vault–linked group); tfvars carry only the `secret_env` name mapping; never committed (verified by Phase 8 secret scan) |
-| T3 | Image tampering / public pull | Private ACR; **MI-only** pull (`AcrPull` on the app's user-assigned identity, admin account off); image pinned by `imageTag` and verified at Deploy |
+| T2 | RiskShield key stolen from code/state/CI | Key lives in Key Vault; app resolves it via secret reference inside Azure; Terraform passes only secret *ids* (`sensitive = true`, never values); pipeline passes the value once via `-var="secrets={...}"` from the `$(riskShieldApiKey)` secret (Key Vault–linked group); tfvars carry only the `secret_env` name mapping; never committed (covered by the repo secret-scan gate) |
+| T3 | Image tampering / public pull | Private ACR; **MI-only** pull (`AcrPull` on the app's user-assigned identity, admin account off); image pinned by `imageTag` and checked at Deploy |
 | T4 | Privilege use before RBAC propagates | 60s `time_sleep.rbac_propagation` guard inside the Container App module; Deploy verify fails loudly on mismatch instead of silently drifting |
 | T5 | Plaintext / downgraded traffic | Ingress HTTPS is the Container Apps **provider default** (`external_enabled = true`), not an explicit TLS/min-version setting; container transport is plain HTTP on 8080 inside the managed environment only. Vendor TLS is **config-controlled, not enforced**: `RiskShieldOptions.BaseUrl` carries `[Url]` only, so an `http://` BaseUrl would silently downgrade vendor traffic — keep the default `https://api.riskshield.com`; add a startup https check before prod use |
 | T6 | Spoofed requests / untraceable calls | `X-Correlation-ID` accepted-or-minted, echoed and forwarded to RiskShield; health split (`live` vs `ready`) so infra vs vendor-config failures are distinguishable. Echo is unbounded — see T10 |
@@ -289,7 +306,7 @@ is manual via Key Vault.
 | A1 | Deliverable lives at `Pollinate/` in the existing repo, not a new repo. |
 | A2 | .NET 10 minimal API (least custom code: resilience, health, DI in framework). |
 | A3 | Azure Container App (first-listed option; MI + Key Vault refs + LA wiring). |
-| A4 | Terraform `>= 1.3.6`; CI pins `1.9.8` (`tfVersion` in the pipeline); azurerm `=4.81.0` (verified init; avoids 5.x breaking changes). Full pin matrix lives in `terraform/README.md`. |
+| A4 | Terraform `>= 1.3.6`; CI pins `1.9.8` (`tfVersion` in the pipeline); azurerm `=4.81.0` (avoids 5.x breaking changes). Full pin matrix lives in `terraform/README.md`. |
 | A5 | Environments exactly `dev` and `prod`. |
 | A6 | No real RiskShield key: happy path proven via stubbed client; live returns clean 502. |
 | A7 | xUnit **v2.9.3** (template default), not v3 — KISS; v3 runner migration buys nothing here. |

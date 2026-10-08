@@ -1,4 +1,4 @@
-# E2E evidence (Phase 8, local — 2026-10-06)
+# E2E evidence (Phase 8, local)
 
 All gates re-run after the Phase 7 doc pass and the two pipeline fixes
 (`dotnetVersion` 9.0.x → 10.0.x to match the `net10.0` target; smoke
@@ -18,7 +18,7 @@ this batch is working tree only (see G9).
 | G6 | YAML re-parse | `python -c "import yaml; yaml.safe_load(...azure-pipelines.yml)"` | OK, stages: Build, InfraDev, InfraProd, DeployDev, DeployProd, SmokeDev, SmokeProd PASS |
 | G7 | Secret scan (repo-wide) | grep for `api-key/password/secret = "..."`, `BEGIN PRIVATE KEY`, storage `AccountKey` | Only `local-dummy-key` (README example) and `"secret-key"` (xUnit stub) — no real keys, no PII values in tfvars/pipeline PASS |
 | G8 | docker build | `docker build -f Dockerfile -t finsure-risk-scoring:e2e .` (context `app/`) | export + `naming to finsure-risk-scoring:e2e done` PASS |
-| G9 | git status | `git status --short` | Pollinate files committed (HEAD `80df616` + this batch uncommitted); untracked: brief `DVT/*.docx` (then untracked; moved with the solution to `Pollinate/*.docx`, now tracked) + new repo-root `README.md` (this batch) PASS |
+| G9 | git status | `git status --short` | Pollinate files committed (HEAD `80df616` + this batch uncommitted); untracked: brief assessment `*.docx` (then untracked; moved with the solution, now tracked) + new repo-root `README.md` (this batch) PASS |
 
 Per-env note: `terraform validate` is backend-independent here (no remote-state
 read at validate time), so root validate covers both `dev` and `prod`
