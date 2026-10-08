@@ -1,0 +1,10 @@
+# Build context is app/. Keep the context lean and secret-free.
+# Only in-context entries: build output, test results, user files.
+**/bin/
+**/obj/
+**/TestResults/
+**/TestResults*/
+*.user
+*.suo
+**/.vs/
+**/.idea/

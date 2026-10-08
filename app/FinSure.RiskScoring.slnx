@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FinSure.RiskScoring.Api/FinSure.RiskScoring.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FinSure.RiskScoring.Api.Tests/FinSure.RiskScoring.Api.Tests.csproj" />
+  </Folder>
+</Solution>

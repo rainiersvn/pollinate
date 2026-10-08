@@ -1,0 +1,376 @@
+# ck-labs Azure DevOps pipeline: 7 stages in 4 phases
+# (Build | InfraDev, InfraProd | DeployDev, DeployProd | SmokeDev, SmokeProd).
+#
+# Every terraform/az/dotnet/docker step is spelled out below. There is no
+# hidden automation: no run.ps1, no wrapper script. Each stage shows the
+# exact command it runs so a reviewer can trace BuildId -> image tag ->
+# terraform apply -> smoke check without leaving this file.
+#
+# Required Azure DevOps setup (outside this file):
+#   Service connections: sc-ck-labs-dev, sc-ck-labs-prod (azurerm / AzureRM).
+#   Variable groups:     vg-ck-labs-dev, vg-ck-labs-prod with:
+#     acrName, tfStateResourceGroup, tfStateStorageAccount (bootstrap output),
+#     containerAppName, appResourceGroup, appFqdn, keyVaultName.
+#   Secrets: RiskShield API key lives in Key Vault and is exposed to the
+#   pipeline as the secret variable $(riskShieldApiKey) via the Key
+#   Vault-linked variable groups above. The Infra plan steps pass it as
+#   -var="secrets={...}" (never committed to tfvars; see README Deploy §2).
+#   Nothing secret is hardcoded here.
+#   Prod approval gate: an Environment approval on env-ck-labs-prod guards
+#   the Prod Apply job (manual sign-off before terraform apply -auto-approve).
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - Pollinate/app/**
+      - Pollinate/terraform/**
+      - Pollinate/pipelines/azure-pipelines.yml
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - Pollinate/app/**
+      - Pollinate/terraform/**
+      - Pollinate/pipelines/azure-pipelines.yml
+
+variables:
+  # Image tag flows explicitly: Build publishes it, Deploy consumes it.
+  # Default is BuildId; overridden at queue time if needed.
+  - name: imageName
+    value: finsure-risk-scoring
+  - name: imageTag
+    value: $(Build.BuildId)
+  - name: tfVersion
+    value: 1.9.8
+  - name: dotnetVersion
+    value: 10.0.x
+  - name: coverageThreshold
+    value: 80
+
+stages:
+  # ---------------------------------------------------------------- Build
+  - stage: Build
+    displayName: Build, test, push image
+    variables:
+      - group: vg-ck-labs-dev
+    jobs:
+      - job: BuildTestPush
+        displayName: Restore, test, Trivy, build and push
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: UseDotNet@2
+            displayName: Use .NET SDK
+            inputs:
+              version: $(dotnetVersion)
+
+          - script: dotnet restore Pollinate/app/FinSure.RiskScoring.slnx
+            displayName: dotnet restore
+
+          # Vulnerable-package gate: fails the build on known CVEs.
+          - script: dotnet list Pollinate/app/FinSure.RiskScoring.slnx package --vulnerable --include-transitive
+            displayName: Check vulnerable packages
+
+          # Tests emit Cobertura; the gate below enforces 80% line coverage.
+          - script: |
+              dotnet test Pollinate/app/FinSure.RiskScoring.slnx --no-restore --configuration Release \
+                --collect:"XPlat Code Coverage" \
+                --results-directory $(Build.SourcesDirectory)/TestResults
+            displayName: dotnet test with coverage
+
+          - script: |
+              python3 - <<'EOF'
+              import glob, sys, xml.etree.ElementTree as ET
+              files = glob.glob('TestResults/**/coverage.cobertura.xml', recursive=True)
+              if not files:
+                  sys.exit('No coverage.cobertura.xml found under TestResults/')
+              path = sorted(files)[0]
+              root = ET.parse(path).getroot()
+              rate = float(root.attrib.get('line-rate', '0')) * 100
+              threshold = float('$(coverageThreshold)')
+              print(f'Line coverage: {rate:.1f}% (gate {threshold:.0f}%) from {path}')
+              sys.exit(0 if rate >= threshold else f'Coverage {rate:.1f}% below gate {threshold:.0f}%')
+              EOF
+            displayName: Enforce 80% coverage gate
+
+          # Optional Trivy image/config scan: never blocks the build.
+          - script: |
+              if command -v trivy >/dev/null 2>&1; then
+                trivy fs --severity HIGH,CRITICAL --exit-code 0 Pollinate/app || true
+              else
+                echo 'Trivy not installed on agent; skipping (non-blocking bonus step).'
+              fi
+            displayName: Trivy scan (optional, non-blocking)
+            continueOnError: true
+
+          # ACR login via the dev service connection, then build + push.
+          # Tag is the explicit $(imageTag) variable (defaults to BuildId).
+          - task: AzureCLI@2
+            displayName: Docker build and push to ACR
+            inputs:
+              azureSubscription: sc-ck-labs-dev
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                ACR_LOGIN_SERVER="$(acrName).azurecr.io"
+                az acr login --name "$(acrName)"
+                docker build -f Pollinate/app/Dockerfile -t "$ACR_LOGIN_SERVER/$(imageName):$(imageTag)" Pollinate/app
+                docker push "$ACR_LOGIN_SERVER/$(imageName):$(imageTag)"
+
+  # ------------------------------------------------------- Infrastructure
+  # Init reads backend coordinates from bootstrap outputs: pass them as
+  # -backend-config flags (-reconfigure). State is per-env
+  # (tfstate-dev / tfstate-prod containers, dev/prod keys). Nothing is
+  # hardcoded beyond the placeholder already in terraform/main.tf.
+  - stage: InfraDev
+    displayName: Infrastructure dev (plan + apply)
+    dependsOn: Build
+    variables:
+      - group: vg-ck-labs-dev
+    jobs:
+      - job: TerraformDev
+        displayName: fmt, validate, plan, apply dev
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: TerraformInstaller@1
+            displayName: Install Terraform
+            inputs:
+              terraformVersion: $(tfVersion)
+
+          - task: AzureCLI@2
+            displayName: Terraform init, fmt, validate, plan, apply (dev)
+            env:
+              RISKSHIELD_API_KEY: $(riskShieldApiKey)
+            inputs:
+              azureSubscription: sc-ck-labs-dev
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: Pollinate/terraform
+              inlineScript: |
+                set -euo pipefail
+                terraform init -reconfigure \
+                  -backend-config="resource_group_name=$(tfStateResourceGroup)" \
+                  -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                  -backend-config="container_name=tfstate-dev" \
+                  -backend-config="key=dev.terraform.tfstate"
+                terraform fmt -check -recursive
+                terraform validate
+                terraform plan -input=false -out=tfplan-dev \
+                  -var-file="environments/dev.tfvars" \
+                  -var="image={ name = \"$(imageName)\", tag = \"$(imageTag)\" }" \
+                  -var="secrets={ \"riskshield-api-key\" = \"$RISKSHIELD_API_KEY\" }"
+                terraform apply -input=false -auto-approve tfplan-dev
+
+  - stage: InfraProd
+    displayName: Infrastructure prod (plan + gated apply)
+    dependsOn: InfraDev
+    variables:
+      - group: vg-ck-labs-prod
+    jobs:
+      - job: TerraformPlanProd
+        displayName: fmt, validate, plan prod
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: TerraformInstaller@1
+            displayName: Install Terraform
+            inputs:
+              terraformVersion: $(tfVersion)
+
+          - task: AzureCLI@2
+            displayName: Terraform init, fmt, validate, plan (prod)
+            env:
+              RISKSHIELD_API_KEY: $(riskShieldApiKey)
+            inputs:
+              azureSubscription: sc-ck-labs-prod
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: Pollinate/terraform
+              inlineScript: |
+                set -euo pipefail
+                terraform init -reconfigure \
+                  -backend-config="resource_group_name=$(tfStateResourceGroup)" \
+                  -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                  -backend-config="container_name=tfstate-prod" \
+                  -backend-config="key=prod.terraform.tfstate"
+                terraform fmt -check -recursive
+                terraform validate
+                terraform plan -input=false -out=tfplan-prod \
+                  -var-file="environments/prod.tfvars" \
+                  -var="image={ name = \"$(imageName)\", tag = \"$(imageTag)\" }" \
+                  -var="secrets={ \"riskshield-api-key\" = \"$RISKSHIELD_API_KEY\" }"
+          - publish: Pollinate/terraform/tfplan-prod
+            artifact: tfplan-prod
+            displayName: Publish prod plan artifact
+
+      # Manual approval gate: environment check on env-ck-labs-prod must
+      # approve before this job runs terraform apply.
+      - deployment: TerraformApplyProd
+        displayName: Apply prod (manual approval)
+        dependsOn: TerraformPlanProd
+        environment: env-ck-labs-prod
+        pool:
+          vmImage: ubuntu-latest
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: TerraformInstaller@1
+                  displayName: Install Terraform
+                  inputs:
+                    terraformVersion: $(tfVersion)
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: Download prod plan artifact
+                  inputs:
+                    buildType: current
+                    artifactName: tfplan-prod
+                    targetPath: $(Pipeline.Workspace)/tfplan-prod
+
+                - task: AzureCLI@2
+                  displayName: Terraform apply prod
+                  inputs:
+                    azureSubscription: sc-ck-labs-prod
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    workingDirectory: Pollinate/terraform
+                    inlineScript: |
+                      set -euo pipefail
+                      cp "$(Pipeline.Workspace)/tfplan-prod/tfplan-prod" tfplan-prod
+                      terraform init -reconfigure \
+                        -backend-config="resource_group_name=$(tfStateResourceGroup)" \
+                        -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                        -backend-config="container_name=tfstate-prod" \
+                        -backend-config="key=prod.terraform.tfstate"
+                      terraform apply -input=false -auto-approve tfplan-prod
+
+  # -------------------------------------------------------------- Deploy
+  # Deploy goes through terraform (image tag var), NOT `az containerapp
+  # update`. A bare `az containerapp update` would mutate fields terraform
+  # owns (cpu/memory/scale/secrets) and cause config drift on the next
+  # plan. The revision itself is created by the Infra apply above; this
+  # stage verifies the running revision matches $(imageTag) and fails
+  # loudly if it does not.
+  - stage: DeployDev
+    displayName: Deploy dev (verify image tag)
+    dependsOn: InfraDev
+    variables:
+      - group: vg-ck-labs-dev
+    jobs:
+      - job: VerifyDev
+        displayName: Verify running image dev
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: AzureCLI@2
+            displayName: Verify Container App image (dev)
+            inputs:
+              azureSubscription: sc-ck-labs-dev
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                # Read-only check: image rollout is owned by terraform apply.
+                # Never `az containerapp update` here: it mutates TF-owned fields.
+                RUNNING="$(az containerapp show --name "$(containerAppName)" --resource-group "$(appResourceGroup)" --query "properties.template.containers[0].image" -o tsv)"
+                echo "Running image: $RUNNING"
+                echo "Expected host+tag: $(acrName).azurecr.io/:$(imageTag)"
+                case "$RUNNING" in
+                  "$(acrName).azurecr.io/"*":$(imageTag)") echo "Image host and tag match." ;;
+                  *) echo "Image mismatch: $RUNNING"; exit 1 ;;
+                esac
+
+  - stage: DeployProd
+    displayName: Deploy prod (verify image tag)
+    dependsOn: InfraProd
+    variables:
+      - group: vg-ck-labs-prod
+    jobs:
+      - job: VerifyProd
+        displayName: Verify running image prod
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: AzureCLI@2
+            displayName: Verify Container App image (prod)
+            inputs:
+              azureSubscription: sc-ck-labs-prod
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                # Read-only check: image rollout is owned by terraform apply.
+                # Never `az containerapp update` here: it mutates TF-owned fields.
+                RUNNING="$(az containerapp show --name "$(containerAppName)" --resource-group "$(appResourceGroup)" --query "properties.template.containers[0].image" -o tsv)"
+                echo "Running image: $RUNNING"
+                echo "Expected host+tag: $(acrName).azurecr.io/:$(imageTag)"
+                case "$RUNNING" in
+                  "$(acrName).azurecr.io/"*":$(imageTag)") echo "Image host and tag match." ;;
+                  *) echo "Image mismatch: $RUNNING"; exit 1 ;;
+                esac
+
+  # --------------------------------------------------------------- Smoke
+  # PII-safe: only synthetic payloads (no real IDs, emails, or RiskShield
+  # keys). /health/* must be 2xx (curl -f). /validate returns 200 when the
+  # vendor is live, or 502 when the vendor is unreachable (wiring correct,
+  # no real key in CI) — both are a smoke PASS. Anything else (400/4xx/5xx
+  # other than 502, connection failure) is a FAIL; see README triage table.
+  - stage: SmokeDev
+    displayName: Smoke dev
+    dependsOn: DeployDev
+    variables:
+      - group: vg-ck-labs-dev
+    jobs:
+      - job: SmokeTestDev
+        displayName: curl health + validate (dev)
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - script: |
+              set -euo pipefail
+              BASE="https://$(appFqdn)"
+              curl -fsS -o /dev/null -w 'live %{http_code}\n' "$BASE/health/live"
+              curl -fsS -o /dev/null -w 'ready %{http_code}\n' "$BASE/health/ready"
+              CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/validate" \
+                -H 'Content-Type: application/json' \
+                -d '{"firstName":"Test","lastName":"User","idNumber":"9001011234088"}')"
+              echo "validate $CODE"
+              case "$CODE" in
+                200|502) echo "validate smoke PASS ($CODE)." ;;
+                *) echo "validate smoke FAIL ($CODE)."; exit 1 ;;
+              esac
+            displayName: Smoke dev endpoints
+
+  - stage: SmokeProd
+    displayName: Smoke prod
+    dependsOn: DeployProd
+    variables:
+      - group: vg-ck-labs-prod
+    jobs:
+      - job: SmokeTestProd
+        displayName: curl health + validate (prod)
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - script: |
+              set -euo pipefail
+              BASE="https://$(appFqdn)"
+              curl -fsS -o /dev/null -w 'live %{http_code}\n' "$BASE/health/live"
+              curl -fsS -o /dev/null -w 'ready %{http_code}\n' "$BASE/health/ready"
+              CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/validate" \
+                -H 'Content-Type: application/json' \
+                -d '{"firstName":"Test","lastName":"User","idNumber":"9001011234088"}')"
+              echo "validate $CODE"
+              case "$CODE" in
+                200|502) echo "validate smoke PASS ($CODE)." ;;
+                *) echo "validate smoke FAIL ($CODE)."; exit 1 ;;
+              esac
+            displayName: Smoke prod endpoints

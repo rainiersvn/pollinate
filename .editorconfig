@@ -1,0 +1,31 @@
+root = true
+
+# All files
+[*]
+indent_style = space
+
+# Xml files
+[*.xml]
+indent_size = 2
+
+# Xml project files
+[*.{csproj,fsproj,vbproj,proj,slnx}]
+indent_size = 2
+
+# Xml config files
+[*.{props,targets,config,nuspec}]
+indent_size = 2
+
+[*.json]
+indent_size = 2
+
+# C# files
+[*.cs]
+indent_size = 4
+tab_width = 4
+
+# New line preferences
+insert_final_newline = false
+
+# File-scoped namespaces (used across the API and tests)
+csharp_style_namespace_declarations = file_scoped:suggestion
